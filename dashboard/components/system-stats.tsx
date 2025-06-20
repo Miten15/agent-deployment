@@ -136,6 +136,11 @@ export function SystemStats() {
           setPrevNetworkIO(currentNetworkIO)
         }
 
+        // Determine network status based on agent status and network activity
+        const hasActiveAgent = agentList.some((agent: any) => agent.status === 'active')
+        const hasNetworkActivity = networkSentRate > 0 || networkRecvRate > 0 || 
+                                  (hardware?.network_io?.bytes_sent > 0 || hardware?.network_io?.bytes_recv > 0)
+        
         const newStats: SystemStats = {
           cpu: {
             usage: hardware?.cpu_percent || 0,
@@ -155,7 +160,7 @@ export function SystemStats() {
           network: {
             sent: networkSentRate,
             received: networkRecvRate,
-            status: agentList.some((agent: any) => agent.status === 'active') ? "connected" : "disconnected"
+            status: (hasActiveAgent || hasNetworkActivity) ? "connected" : "disconnected"
           }
         }
 
