@@ -18,7 +18,8 @@ class CommandExecutor:
         self.default_allowed_commands = [
             "dir", "ls", "ps", "netstat", "whoami", "systeminfo", "ipconfig", "ifconfig",
             "ping", "tracert", "traceroute", "nslookup", "route", "arp", "tasklist",
-            "wmic", "get-process", "get-service", "get-computerinfo"
+            "wmic", "get-process", "get-service", "get-computerinfo","RUN_BEHAVIORAL_SCAN","GET_BEHAVIORAL_HISTORY",
+        "STOP_BEHAVIORAL_SCAN"
         ]
     
     def execute_command(self, command, timeout=30):

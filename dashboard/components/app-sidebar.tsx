@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/sidebar"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { LayoutDashboard, Server, Terminal, History, HardDrive, Settings, Shield, LogOut, User } from "lucide-react"
+import { LayoutDashboard, Server, Terminal, History, HardDrive, Settings, Shield, LogOut, User, Eye } from "lucide-react"
 import Link from "next/link"
 import { useRouter, usePathname } from "next/navigation"
 import { useToast } from "@/hooks/use-toast"
@@ -54,6 +54,11 @@ const menuItems = [
     title: "Hardening",
     url: "/dashboard/hardening",
     icon: Shield,
+  },
+  {
+    title: "Behavioral Analysis",
+    url: "/dashboard/behavioral",
+    icon: Eye,
   },
 ]
 

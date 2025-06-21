@@ -1,8 +1,7 @@
 {
     "server_url": "http://localhost:8080/",
-    "heartbeat_interval": 60,
-    "inventory_interval": 300,
-    "allowed_commands": [
+    "heartbeat_interval": 30,
+    "inventory_interval": 300,    "allowed_commands": [
         "dir",
         "ls",
         "ps",
@@ -31,8 +30,39 @@
         "winget",
         "choco",
         "pip",
-        "npm"
+        "npm",
+        "RUN_BEHAVIORAL_SCAN",
+        "GET_BEHAVIORAL_HISTORY",
+        "STOP_BEHAVIORAL_SCAN"
     ],
-    "max_command_timeout": 30,
+    "max_command_timeout": 30,    "behavioral_detection": {
+        "profile_duration": 120,
+        "sampling_interval": 2,
+        "suspicion_threshold": 4.0,
+        "high_privilege_users": [
+            "NT AUTHORITY\\SYSTEM", "root", "SYSTEM", "Administrator"
+        ],
+        "high_disk_reads_mb": 350,
+        "contextual_disk_reads_mb": 800,
+        "high_data_egress_mb": 5,
+        "sensitive_data_egress_mb": 1,
+        "persistent_connection_seconds": 60,
+        "off_hours_connection_seconds": 30,
+        "high_cpu_percent": 60,
+        "sustained_cpu_duration_minutes": 3,
+        "sustained_cpu_samples": 30,
+        "beaconing_min_intervals": 5,
+        "beaconing_variance_threshold": 0.15,
+        "beaconing_min_interval_seconds": 5,
+        "beaconing_max_interval_seconds": 600,
+        "slow_beacon_max_interval_seconds": 3600,
+        "legitimate_processes": [
+            "windows defender", "defender", "antimalware", "msmpeng.exe",
+            "backup", "veeam", "acronis", "carbonite",
+            "chrome.exe", "firefox.exe", "edge.exe", "browser",
+            "system monitor", "perfmon", "procmon", "sysmon"
+        ],
+        "auto_scan_interval": 3600
+    },
     "api_key": "AgentKey-20250613-c34ciIMzVFsuOuu6YUuOGbwJaJRSWAqe"
 }

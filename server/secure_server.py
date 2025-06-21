@@ -21,7 +21,7 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max request size
 app.config['JSON_AS_ASCII'] = False
 
 # Enable CORS for Next.js frontend
-CORS(app, origins=["http://localhost:3000"], supports_credentials=True)
+CORS(app, origins=["http://localhost:3000","*"], supports_credentials=True)
 
 # JWT Configuration
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', secrets.token_hex(32))
@@ -35,7 +35,7 @@ commands = {}
 command_results = {}
 
 # Agent timeout settings (consider agents offline after this time)
-AGENT_TIMEOUT_SECONDS = 60  # 1 minute without heartbeat = offline
+AGENT_TIMEOUT_SECONDS = 90  # 90 seconds (3x 30s heartbeat interval) for reliability
 
 # Default admin credentials (change these!)
 ADMIN_USERS = {

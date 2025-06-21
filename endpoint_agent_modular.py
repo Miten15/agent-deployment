@@ -3,6 +3,8 @@ import os
 import sys
 import json
 import time
+import uuid
+import psutil
 import threading
 import queue
 import hashlib
@@ -18,6 +20,7 @@ from modules.sbom import SBOMCollector
 from modules.command_executor import CommandExecutor
 from modules.network_manager import NetworkManager
 from modules.hardening_manager import HardeningManager
+from modules.behavioral_anomaly_detector import BehavioralAnomalyDetector
 
 # Load environment variables
 load_dotenv()
@@ -26,33 +29,37 @@ load_dotenv()
 class ModularEndpointAgent:
     """Modular Endpoint Agent with separated responsibilities"""
     
-    def __init__(self, server_url=None, config_file="agent_config.json", api_key=None):        # Configuration
+    def __init__(self, server_url=None, config_file="agent_config.json", api_key=None):
+        # Configuration
         self.server_url = server_url or os.getenv('SERVER_URL', 'http://localhost:8080/')
         self.api_key = api_key or os.getenv('AGENT_API_KEY', 'your-secret-agent-key-here')
         self.config_file = config_file
         
         # Generate unique agent ID
         self.agent_id = self._generate_agent_id()
-        
-        # Setup logging
+          # Setup logging
         self._setup_logging()
         
         # Load configuration
         self.config = self._load_config()
-          # Initialize modules
+        
+        # Initialize modules
         self.system_info = SystemInfoCollector(self.agent_id)
         self.sbom_collector = SBOMCollector(self.agent_id)
         self.command_executor = CommandExecutor(self.agent_id, self.config)
         self.network_manager = NetworkManager(self.server_url, self.api_key, self.agent_id)
         self.hardening_manager = HardeningManager(self.agent_id)
         
+        # Initialize Behavioral Anomaly Detector
+        behavioral_config = self.config.get('behavioral_detection', {})
+        self.behavioral_detector = BehavioralAnomalyDetector(self.agent_id, behavioral_config)
+        
         # Agent state
         self.running = True
         self.command_queue = queue.Queue()
         self.latest_command = None
-        
-        # Intervals (from config)
-        self.heartbeat_interval = self.config.get('heartbeat_interval', 60)
+          # Intervals (from config) - Optimized for better detection
+        self.heartbeat_interval = self.config.get('heartbeat_interval', 30)  # 30s standard
         self.inventory_interval = self.config.get('inventory_interval', 300)
         self.sbom_interval = self.config.get('sbom_interval', 1800)  # 30 minutes
         
@@ -80,26 +87,58 @@ class ModularEndpointAgent:
             handlers=[
                 logging.FileHandler(f'agent_{self.agent_id}.log'),
                 logging.StreamHandler()
-            ]
-        )
+            ]        )
         self.logger = logging.getLogger(f'EndpointAgent_{self.agent_id}')
     
     def _load_config(self):
         """Load agent configuration"""
         default_config = {
             "server_url": self.server_url,
-            "heartbeat_interval": 60,
+            "heartbeat_interval": 30,  # Reduced to 30s for faster detection
             "inventory_interval": 300,
-            "sbom_interval": 1800,            "allowed_commands": [
+            "sbom_interval": 1800,
+            "allowed_commands": [
                 "dir", "ls", "ps", "netstat", "whoami", "systeminfo", "ipconfig", "ifconfig",
                 "ping", "tracert", "traceroute", "nslookup", "route", "arp", "tasklist",
                 "wmic", "get-process", "get-service", "get-computerinfo", "powershell",
                 "RUN_HARDENING_AUDIT", "GET_HARDENING_STATUS", "COLLECT_INVENTORY", 
-                "COLLECT_SBOM", "SHOW_INSTALLED_SOFTWARE", "GET_SYSTEM_INFO"
+                "COLLECT_SBOM", "SHOW_INSTALLED_SOFTWARE", "GET_SYSTEM_INFO",
+                "RUN_BEHAVIORAL_SCAN", "GET_BEHAVIORAL_HISTORY", "STOP_BEHAVIORAL_SCAN"
             ],
             "max_command_timeout": 60,
             "enable_full_sbom": True,
-            "enable_system_monitoring": True        }
+            "enable_system_monitoring": True,
+            "behavioral_detection": {
+                "profile_duration": 120,
+                "sampling_interval": 2,
+                "suspicion_threshold": 4.0,  # Updated to 0-10 scale
+                "high_privilege_users": [
+                    "NT AUTHORITY\\SYSTEM", "root", "SYSTEM", "Administrator"
+                ],
+                # Research-based thresholds from NIST, MITRE ATT&CK, and security frameworks
+                "high_disk_reads_mb": 350,  # 300-400MB range for enterprise
+                "contextual_disk_reads_mb": 800,  # Higher for AV/backup tools
+                "high_data_egress_mb": 5,  # Lowered based on APT research
+                "sensitive_data_egress_mb": 1,  # Stricter for sensitive systems
+                "persistent_connection_seconds": 60,  # Maintained
+                "off_hours_connection_seconds": 30,  # Stricter outside business hours
+                "high_cpu_percent": 60,  # Lowered from 70% based on research
+                "sustained_cpu_duration_minutes": 3,  # 3-5 min requirement
+                "sustained_cpu_samples": 30,  # Increased for 3-min duration
+                "beaconing_min_intervals": 5,  # Minimum intervals
+                "beaconing_variance_threshold": 0.15,  # Tightened to 15%
+                "beaconing_min_interval_seconds": 5,  # 5s minimum
+                "beaconing_max_interval_seconds": 600,  # 10min maximum
+                "slow_beacon_max_interval_seconds": 3600,  # 1hr for "low and slow"
+                "legitimate_processes": [
+                    "windows defender", "defender", "antimalware", "msmpeng.exe",
+                    "backup", "veeam", "acronis", "carbonite",
+                    "chrome.exe", "firefox.exe", "edge.exe", "browser",
+                    "system monitor", "perfmon", "procmon", "sysmon"
+                ],
+                "auto_scan_interval": 3600  # Run behavioral scan every hour
+            }
+        }
         
         try:
             if os.path.exists(self.config_file):
@@ -242,13 +281,14 @@ class ModularEndpointAgent:
             return {
                 "agent_id": self.agent_id,
                 "message_type": "sbom",
-                "timestamp": datetime.now().isoformat(),
-                "error": str(e)
+                "timestamp": datetime.now().isoformat(),                "error": str(e)
             }
     
     def handle_special_commands(self, command):
         """Handle special agent commands"""
+        original_command = command
         command = command.strip().upper()
+        self.logger.info(f"Handling special command: '{original_command}' -> '{command}'")
         
         if command == "COLLECT_INVENTORY":
             self.logger.info("Handling COLLECT_INVENTORY command")
@@ -367,59 +407,209 @@ class ModularEndpointAgent:
                          f"Memory: {hardware_info.get('memory_total_gb', 'Unknown')} GB total, {hardware_info.get('memory_used_gb', 'Unknown')} GB used ({hardware_info.get('memory_percent', 'Unknown')}%)\\n" +
                          f"Boot Time: {basic_info.get('boot_time', 'Unknown')}",
                 "timestamp": datetime.now().isoformat(),
-                "system_data": {"basic": basic_info, "hardware": hardware_info}            }
-        
-        elif command == "HELP":
-            suggestions = self.command_executor.get_command_suggestions()
-            return {
-                "command": "HELP",
-                "return_code": 0,
-                "success": True,
-                "output": f"Available Commands:\\n" +
-                         f"Special Commands: COLLECT_INVENTORY, COLLECT_SBOM, SHOW_INSTALLED_SOFTWARE, GET_SYSTEM_INFO, RUN_HARDENING_AUDIT, GET_HARDENING_STATUS, HELP\\n\\n" +
-                         f"System Commands: {', '.join(suggestions['allowed_commands'])}\\n\\n" +
-                         f"Platform: {suggestions['platform']}\\n" +
-                         f"Example Commands: {', '.join(suggestions['examples'].get(suggestions['platform'], []))}",
-                "timestamp": datetime.now().isoformat(),
-                "help_data": suggestions
+                "system_data": {"basic": basic_info, "hardware": hardware_info}
             }
         
+        elif command == "RUN_BEHAVIORAL_SCAN":
+            self.logger.info("Handling RUN_BEHAVIORAL_SCAN command")
+            try:
+                # Get optional duration parameter (default to config value)
+                duration = self.config.get('behavioral_detection', {}).get('profile_duration', 120)
+                
+                # Run behavioral scan
+                scan_result = self.behavioral_detector.run_full_detection(duration)
+                
+                # Send results to server
+                behavioral_message = {
+                    "agent_id": self.agent_id,
+                    "message_type": "behavioral_scan",
+                    "timestamp": datetime.now().isoformat(),
+                    "data": scan_result
+                }
+                
+                if self.network_manager.send_data(behavioral_message):
+                    suspicious_count = len(scan_result.get('suspicious_processes', []))
+                    total_analyzed = scan_result.get('summary', {}).get('total_processes_analyzed', 0)
+                    
+                    # Format summary output
+                    output_lines = [
+                        "Behavioral Anomaly Detection Scan Completed",
+                        "=" * 50,
+                        f"Scan Duration: {duration} seconds",
+                        f"Total Processes Analyzed: {total_analyzed}",
+                        f"Suspicious Processes Found: {suspicious_count}",
+                        ""
+                    ]
+                    
+                    if suspicious_count > 0:
+                        output_lines.append("Suspicious Processes:")
+                        for process in scan_result.get('suspicious_processes', []):
+                            output_lines.append(f"• {process['process_name']} (PID: {process['pid']})")
+                            output_lines.append(f"  Risk Level: {process['risk_level'].upper()}")
+                            output_lines.append(f"  Suspicion Score: {process['suspicion_score']}")
+                            output_lines.append(f"  User: {process['username']}")
+                            
+                            # Show top 3 suspicious behaviors
+                            behaviors = process.get('suspicious_behaviors', [])[:3]
+                            for behavior in behaviors:
+                                output_lines.append(f"    - {behavior['description']}")
+                            output_lines.append("")
+                    else:
+                        output_lines.append("No suspicious processes detected.")
+                    
+                    return {                        "command": "RUN_BEHAVIORAL_SCAN",
+                        "return_code": 0,
+                        "success": True,
+                        "output": "\\n".join(output_lines),
+                        "timestamp": datetime.now().isoformat(),
+                        "behavioral_data": scan_result
+                    }
+                else:
+                    # Even if server connection fails, return the scan results for testing/debugging
+                    return {
+                        "command": "RUN_BEHAVIORAL_SCAN",
+                        "return_code": 1,
+                        "success": False,
+                        "error": "Failed to send behavioral scan results to server",
+                        "timestamp": datetime.now().isoformat(),
+                        "behavioral_data": scan_result  # Include scan results even on server failure
+                    }
+                    
+            except Exception as e:
+                self.logger.error(f"Error running behavioral scan: {e}")
+                return {
+                    "command": "RUN_BEHAVIORAL_SCAN",
+                    "return_code": 1,
+                    "success": False,
+                    "error": f"Behavioral scan failed: {str(e)}",
+                    "timestamp": datetime.now().isoformat()
+                }
+        
+        elif command == "GET_BEHAVIORAL_HISTORY":
+            self.logger.info("Handling GET_BEHAVIORAL_HISTORY command")
+            try:
+                history = self.behavioral_detector.get_detection_history()
+                history_count = len(history)
+                
+                if history_count == 0:
+                    return {
+                        "command": "GET_BEHAVIORAL_HISTORY",
+                        "return_code": 0,
+                        "success": True,
+                        "output": "No behavioral scan history available. Run RUN_BEHAVIORAL_SCAN first.",
+                        "timestamp": datetime.now().isoformat(),
+                        "behavioral_history": []
+                    }
+                
+                # Format history summary
+                output_lines = ["Behavioral Detection History", "=" * 30]
+                
+                for i, scan in enumerate(history[-5:], 1):  # Show last 5 scans
+                    metadata = scan.get('detection_metadata', {})
+                    summary = scan.get('summary', {})
+                    
+                    output_lines.append(f"\\nScan #{i}:")
+                    output_lines.append(f"  Time: {metadata.get('detection_timestamp', 'Unknown')}")
+                    output_lines.append(f"  Duration: {metadata.get('analysis_duration_seconds', 'Unknown')}s")
+                    output_lines.append(f"  Processes Analyzed: {summary.get('total_processes_analyzed', 0)}")
+                    output_lines.append(f"  Suspicious Processes: {summary.get('suspicious_processes_found', 0)}")
+                    
+                    risk_dist = summary.get('risk_distribution', {})
+                    if any(risk_dist.values()):
+                        output_lines.append(f"  Risk Distribution: Critical={risk_dist.get('critical', 0)}, High={risk_dist.get('high', 0)}, Medium={risk_dist.get('medium', 0)}")
+                
+                return {
+                    "command": "GET_BEHAVIORAL_HISTORY",
+                    "return_code": 0,
+                    "success": True,
+                    "output": "\\n".join(output_lines),
+                    "timestamp": datetime.now().isoformat(),
+                    "behavioral_history": history
+                }
+                
+            except Exception as e:
+                self.logger.error(f"Error getting behavioral history: {e}")
+                return {
+                    "command": "GET_BEHAVIORAL_HISTORY",
+                    "return_code": 1,
+                    "success": False,
+                    "error": f"Failed to get behavioral history: {str(e)}",
+                    "timestamp": datetime.now().isoformat()
+                }
+        
+        elif command == "STOP_BEHAVIORAL_SCAN":
+            self.logger.info("Handling STOP_BEHAVIORAL_SCAN command")
+            try:
+                self.behavioral_detector.stop_profiling()
+                return {
+                    "command": "STOP_BEHAVIORAL_SCAN",
+                    "return_code": 0,
+                    "success": True,
+                    "output": "Behavioral profiling stopped successfully.",
+                    "timestamp": datetime.now().isoformat()
+                }
+            except Exception as e:
+                self.logger.error(f"Error stopping behavioral scan: {e}")
+                return {
+                    "command": "STOP_BEHAVIORAL_SCAN",
+                    "return_code": 1,
+                    "success": False,
+                    "error": f"Failed to stop behavioral scan: {str(e)}",
+                    "timestamp": datetime.now().isoformat()
+                }
+        
+        # Hardening commands
         elif command == "RUN_HARDENING_AUDIT":
             self.logger.info("Handling RUN_HARDENING_AUDIT command")
             try:
-                audit_results = self.hardening_manager.run_hardening_audit()
+                result = self.hardening_manager.run_hardening_audit()
                 
-                if audit_results.get('status') == 'success':
-                    summary = audit_results.get('summary', {})
-                    
-                    return {
-                        "command": "RUN_HARDENING_AUDIT",
-                        "return_code": 0,
-                        "success": True,
-                        "output": f"Windows Hardening Audit Completed\\n{'='*50}\\n" +
-                                 f"HardeningKitty Score: {summary.get('score', 0):.2f}/6.0\\n" +
-                                 f"Total Checks: {summary.get('total_checks', 0)}\\n" +
-                                 f"✅ Passed: {summary.get('passed', 0)}\\n" +
-                                 f"🟡 Low Risk: {summary.get('low', 0)}\\n" +
-                                 f"🟠 Medium Risk: {summary.get('medium', 0)}\\n" +
-                                 f"🔴 High Risk: {summary.get('high', 0)}\\n" +
-                                 f"\\n📊 Score Rating:\\n" +
-                                 f"6.0 = 😹 Excellent\\n5.0 = 😺 Well done\\n4.0 = 😼 Sufficient\\n" +
-                                 f"3.0 = 😿 You should do better\\n2.0 = 🙀 Weak\\n1.0 = 😾 Bogus\\n" +
-                                 f"\\nScan completed at: {audit_results.get('timestamp')}",
+                if result["success"]:
+                    # Send hardening results to server
+                    hardening_message = {
+                        "agent_id": self.agent_id,
+                        "message_type": "hardening_audit",
                         "timestamp": datetime.now().isoformat(),
-                        "hardening_data": audit_results
+                        "data": result
                     }
+                    
+                    if self.network_manager.send_data(hardening_message):
+                        return {
+                            "command": "RUN_HARDENING_AUDIT",
+                            "return_code": 0,
+                            "success": True,
+                            "output": f"Windows Hardening Audit Completed\\n{'='*40}\\n" +
+                                      f"Agent ID: {result.get('agent_id')}\\n" +
+                                      f"Timestamp: {result.get('timestamp')}\\n" +
+                                      f"Overall Score: {result.get('hardening_score', 0):.2f}/6.0\\n" +
+                                      f"Critical Findings: {len([f for f in result.get('findings', []) if f.get('severity') == 'Critical'])}\\n" +
+                                      f"High Findings: {len([f for f in result.get('findings', []) if f.get('severity') == 'High'])}\\n" +
+                                      f"Medium Findings: {len([f for f in result.get('findings', []) if f.get('severity') == 'Medium'])}\\n" +
+                                      f"Total Findings: {len(result.get('findings', []))}\\n" +
+                                      f"HardeningKitty Available: {'✅ Yes' if result.get('hardening_kitty_available') else '❌ No'}\\n" +
+                                      f"Scan Duration: {result.get('scan_duration_seconds', 0):.1f} seconds",
+                            "timestamp": datetime.now().isoformat(),
+                            "hardening_data": result
+                        }
+                    else:
+                        return {
+                            "command": "RUN_HARDENING_AUDIT",
+                            "return_code": 1,
+                            "success": False,
+                            "error": "Failed to send hardening audit results to server",
+                            "timestamp": datetime.now().isoformat()
+                        }
                 else:
                     return {
                         "command": "RUN_HARDENING_AUDIT",
                         "return_code": 1,
                         "success": False,
-                        "error": f"Hardening audit failed: {audit_results.get('error', 'Unknown error')}",
+                        "error": result.get("error", "Hardening audit failed"),
                         "timestamp": datetime.now().isoformat()
                     }
+                    
             except Exception as e:
-                self.logger.error(f"Hardening audit error: {str(e)}")
+                self.logger.error(f"Error running hardening audit: {e}")
                 return {
                     "command": "RUN_HARDENING_AUDIT",
                     "return_code": 1,
@@ -432,18 +622,17 @@ class ModularEndpointAgent:
             self.logger.info("Handling GET_HARDENING_STATUS command")
             try:
                 status = self.hardening_manager.get_hardening_status()
-                
                 return {
                     "command": "GET_HARDENING_STATUS",
                     "return_code": 0,
                     "success": True,
                     "output": f"Windows Hardening Status\\n{'='*30}\\n" +
-                             f"Agent ID: {status.get('agent_id')}\\n" +
-                             f"Last Scan: {status.get('last_scan_time', 'Never')}\\n" +
-                             f"Current Score: {status.get('hardening_score', 0):.2f}/6.0\\n" +
-                             f"HardeningKitty Available: {'✅ Yes' if status.get('hardening_kitty_available') else '❌ No'}\\n" +
-                             f"Available Finding Lists: {len(status.get('available_lists', []))}\\n" +
-                             f"Temp Directory: {status.get('temp_directory')}",
+                              f"Agent ID: {status.get('agent_id')}\\n" +
+                              f"Last Scan: {status.get('last_scan_time', 'Never')}\\n" +
+                              f"Current Score: {status.get('hardening_score', 0):.2f}/6.0\\n" +
+                              f"HardeningKitty Available: {'✅ Yes' if status.get('hardening_kitty_available') else '❌ No'}\\n" +
+                              f"Available Finding Lists: {len(status.get('available_lists', []))}\\n" +
+                              f"Temp Directory: {status.get('temp_directory')}",
                     "timestamp": datetime.now().isoformat(),
                     "status_data": status
                 }
@@ -456,23 +645,25 @@ class ModularEndpointAgent:
                     "error": f"Failed to get hardening status: {str(e)}",
                     "timestamp": datetime.now().isoformat()
                 }
-        
-        return None  # Not a special command
+          # Return None if command not recognized
+        return None
     
-    def execute_command(self, command, timeout=None):
-        """Execute a command (special or system)"""
+    def execute_command(self, command):
+        """Execute a command using the command executor"""
         try:
-            if not timeout:
-                timeout = self.config.get('max_command_timeout', 60)
+            self.logger.info(f"Execute command called with: '{command}'")
             
-            # Check for special commands first
+            # Check if it's a special command first
+            self.logger.info(f"Checking if '{command}' is a special command...")
             special_result = self.handle_special_commands(command)
-            if special_result:
+            if special_result is not None:
+                self.logger.info(f"Special command handled successfully: {command}")
+                self.logger.info(f"Special command result: {special_result}")
                 return special_result
             
-            # Execute as regular system command
-            result = self.command_executor.execute_command(command, timeout)
-            return result
+            self.logger.info(f"Not a special command, executing normally: {command}")
+            # If not a special command, execute normally
+            return self.command_executor.execute_command(command)
             
         except Exception as e:
             self.logger.error(f"Error executing command '{command}': {e}")
@@ -480,172 +671,255 @@ class ModularEndpointAgent:
                 "command": command,
                 "return_code": 1,
                 "success": False,
-                "error": str(e),
+                "error": str(e),                
                 "timestamp": datetime.now().isoformat()
             }
     
-    def command_worker(self):
-        """Worker thread for processing commands"""
-        self.logger.info("Command worker thread started")
-        
-        while self.running:
-            try:
-                # Get pending commands from server
-                commands = self.network_manager.get_commands()
+    def send_heartbeat(self):
+        """Send heartbeat to server"""
+        try:
+            # Get system info for heartbeat
+            system_info = self.system_info.collect_basic_info()
+            
+            # Use the dedicated heartbeat endpoint via network manager
+            success = self.network_manager.send_heartbeat(system_info, self.latest_command)
+            
+            if success:
+                self.logger.info(f"Heartbeat sent successfully for agent {self.agent_id}")
+            else:
+                self.logger.warning(f"Heartbeat failed for agent {self.agent_id} - server may be offline")
                 
+            return success
+        except Exception as e:
+            self.logger.error(f"Error sending heartbeat: {e}")
+            return False
+    
+    def check_for_commands(self):
+        """Check server for pending commands"""
+        try:
+            self.logger.debug("Checking for commands from server...")
+            commands = self.network_manager.get_commands()
+            
+            if commands:
                 for command_data in commands:
-                    command_id = command_data.get('command_id')
-                    command = command_data.get('command')
-                    timeout = command_data.get('timeout', 30)
+                    command = command_data.get('command', '').strip()
+                    command_id = command_data.get('command_id', 'unknown')
                     
-                    self.logger.info(f"Processing command: {command}")
-                    
-                    # Execute command
-                    result = self.execute_command(command, timeout)
-                    
-                    # Update latest command
-                    self.latest_command = {
-                        "command": command,
-                        "timestamp": datetime.now().isoformat(),
-                        "return_code": result.get('return_code', 1)
-                    }
-                    
-                    # Send result back to server
-                    self.network_manager.send_command_result(command_id, result)
-                
-                # Sleep before checking for more commands
-                time.sleep(5)
-                
-            except Exception as e:
-                self.logger.error(f"Error in command worker: {e}")
-                time.sleep(10)
+                    if command:
+                        self.logger.info(f"Received command: {command} (ID: {command_id})")
+                        self.latest_command = command
+                        self.command_queue.put((command, command_id))
+                        
+        except Exception as e:
+            self.logger.error(f"Error checking for commands: {e}")
     
-    def heartbeat_worker(self):
-        """Worker thread for sending heartbeats"""
-        self.logger.info("Heartbeat worker thread started")
-        
-        while self.running:
+    def process_command_queue(self):
+        """Process commands from the queue using threading for non-blocking execution"""
+        while not self.command_queue.empty():
             try:
-                # Get basic system info for heartbeat
-                basic_info = self.system_info.collect_basic_info()
+                command, command_id = self.command_queue.get(timeout=1)
+                self.logger.info(f"Processing command: {command}")
                 
-                # Send heartbeat
-                self.network_manager.send_heartbeat(basic_info, self.latest_command)
+                # Check if it's a long-running command that should be threaded
+                long_running_commands = [
+                    'RUN_BEHAVIORAL_SCAN', 'COLLECT_INVENTORY', 'COLLECT_SBOM', 
+                    'SHOW_INSTALLED_SOFTWARE', 'RUN_HARDENING_AUDIT'
+                ]
                 
-                # Sleep until next heartbeat
-                time.sleep(self.heartbeat_interval)
+                is_long_running = any(cmd in command.upper() for cmd in long_running_commands)
                 
+                if is_long_running:
+                    # Execute long-running commands in separate thread
+                    self.logger.info(f"Executing long-running command in thread: {command}")
+                    thread = threading.Thread(
+                        target=self._execute_command_threaded,
+                        args=(command, command_id),
+                        daemon=True
+                    )
+                    thread.start()
+                else:
+                    # Execute short commands synchronously
+                    result = self.execute_command(command)
+                    self._send_command_result(command, command_id, result)
+                
+                self.command_queue.task_done()
+                
+            except queue.Empty:
+                break
             except Exception as e:
-                self.logger.error(f"Error in heartbeat worker: {e}")
-                time.sleep(30)
+                self.logger.error(f"Error processing command: {e}")
     
-    def inventory_worker(self):
-        """Worker thread for periodic inventory collection"""
-        self.logger.info("Inventory worker thread started")
-        
-        while self.running:
-            try:
-                # Collect and send full inventory
+    def _execute_command_threaded(self, command, command_id):
+        """Execute command in a separate thread"""
+        try:
+            self.logger.info(f"Thread executing: {command}")
+            result = self.execute_command(command)
+            self._send_command_result(command, command_id, result)
+        except Exception as e:
+            self.logger.error(f"Error in threaded command execution: {e}")
+            error_result = {
+                "command": command,
+                "return_code": 1,
+                "success": False,
+                "error": f"Thread execution error: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            }
+            self._send_command_result(command, command_id, error_result)
+    
+    def _send_command_result(self, command, command_id, result):
+        """Send command result to server"""
+        try:
+            result_data = {
+                "agent_id": self.agent_id,
+                "message_type": "command_result",
+                "command_id": command_id,
+                "timestamp": datetime.now().isoformat(),
+                "result": result
+            }
+            
+            self.network_manager.send_data(result_data)
+            self.logger.info(f"Command result sent: {command}")
+        except Exception as e:
+            self.logger.error(f"Error sending command result: {e}")
+    
+    def run_periodic_tasks(self):
+        """Run periodic tasks like inventory collection"""
+        try:
+            current_time = time.time()
+            
+            # Check if it's time for full inventory
+            if (current_time - getattr(self, 'last_inventory_time', 0)) >= self.inventory_interval:
+                self.logger.info("Running periodic inventory collection...")
                 inventory = self.collect_full_inventory()
                 self.network_manager.send_data(inventory)
+                self.last_inventory_time = current_time
                 
-                # Sleep until next inventory collection
-                time.sleep(self.inventory_interval)
-                
-            except Exception as e:
-                self.logger.error(f"Error in inventory worker: {e}")
-                time.sleep(60)
-    
-    def sbom_worker(self):
-        """Worker thread for periodic SBOM collection"""
-        if not self.config.get('enable_full_sbom', True):
-            self.logger.info("SBOM collection disabled")
-            return
-        
-        self.logger.info("SBOM worker thread started")
-        
-        while self.running:
-            try:
-                # Collect and send SBOM
+            # Check if it's time for SBOM collection
+            if (current_time - getattr(self, 'last_sbom_time', 0)) >= self.sbom_interval:
+                self.logger.info("Running periodic SBOM collection...")
                 sbom = self.collect_sbom()
                 self.network_manager.send_data(sbom)
+                self.last_sbom_time = current_time
                 
-                # Sleep until next SBOM collection
-                time.sleep(self.sbom_interval)
-                
-            except Exception as e:
-                self.logger.error(f"Error in SBOM worker: {e}")
-                time.sleep(300)  # Wait 5 minutes on error
-    
-    def start(self):
-        """Start the agent"""
-        self.logger.info("Starting Modular Endpoint Agent...")
-        
-        # Test server connection
-        if not self.network_manager.test_connection():
-            self.logger.error("Cannot connect to server, starting anyway...")
-        
-        # Start worker threads
-        threads = [
-            threading.Thread(target=self.heartbeat_worker, daemon=True),
-            threading.Thread(target=self.command_worker, daemon=True),
-            threading.Thread(target=self.inventory_worker, daemon=True),
-            threading.Thread(target=self.sbom_worker, daemon=True)
-        ]
-        
-        for thread in threads:
-            thread.start()
-        
-        self.logger.info("All worker threads started")
-        
-        # Send initial inventory
-        try:
-            initial_inventory = self.collect_full_inventory()
-            self.network_manager.send_data(initial_inventory)
-            self.logger.info("Initial inventory sent")
+            # Check if behavioral detection is enabled and if it's time for auto-scan
+            behavioral_config = self.config.get('behavioral_detection', {})
+            auto_scan_interval = behavioral_config.get('auto_scan_interval', 0)
+            
+            if auto_scan_interval > 0:
+                if (current_time - getattr(self, 'last_behavioral_scan_time', 0)) >= auto_scan_interval:
+                    self.logger.info("Running periodic behavioral scan...")
+                    try:
+                        scan_result = self.behavioral_detector.run_full_detection()
+                        behavioral_message = {
+                            "agent_id": self.agent_id,
+                            "message_type": "behavioral_scan",
+                            "timestamp": datetime.now().isoformat(),
+                            "data": scan_result
+                        }
+                        self.network_manager.send_data(behavioral_message)
+                        self.last_behavioral_scan_time = current_time
+                    except Exception as e:
+                        self.logger.error(f"Error in periodic behavioral scan: {e}")
+                        
         except Exception as e:
-            self.logger.error(f"Failed to send initial inventory: {e}")
+            self.logger.error(f"Error in periodic tasks: {e}")
+    
+    def run(self):
+        """Main agent execution loop"""
+        self.logger.info("Starting Modular Endpoint Agent...")
+        self.start_time = time.time()
         
-        # Main loop
+        # Initialize timers
+        last_heartbeat = 0
+        last_command_check = 0
+        last_periodic_tasks = 0
+        
         try:
             while self.running:
+                current_time = time.time()
+                
+                # Send heartbeat
+                if (current_time - last_heartbeat) >= self.heartbeat_interval:
+                    self.send_heartbeat()
+                    last_heartbeat = current_time
+                  # Check for commands (more frequent for responsiveness)
+                if (current_time - last_command_check) >= 10:  # Check every 10 seconds
+                    self.check_for_commands()
+                    last_command_check = current_time
+                
+                # Process command queue
+                self.process_command_queue()
+                
+                # Run periodic tasks
+                if (current_time - last_periodic_tasks) >= 60:  # Check every minute
+                    self.run_periodic_tasks()
+                    last_periodic_tasks = current_time
+                
+                # Sleep to prevent excessive CPU usage
                 time.sleep(1)
+                
         except KeyboardInterrupt:
-            self.logger.info("Shutdown requested by user")
+            self.logger.info("Received interrupt signal, shutting down...")
+        except Exception as e:
+            self.logger.error(f"Unexpected error in main loop: {e}")
+        finally:
             self.stop()
     
     def stop(self):
         """Stop the agent"""
         self.logger.info("Stopping Modular Endpoint Agent...")
         self.running = False
-        time.sleep(2)  # Give threads time to finish
-        self.logger.info("Modular Endpoint Agent stopped")
+        
+        # Stop behavioral profiling if running
+        try:
+            if hasattr(self, 'behavioral_detector'):
+                self.behavioral_detector.stop_profiling()
+        except Exception as e:
+            self.logger.error(f"Error stopping behavioral detector: {e}")
 
 
 def main():
-    """Main entry point"""
+    """Main function"""
     import argparse
     
     parser = argparse.ArgumentParser(description='Modular Endpoint Agent')
-    parser.add_argument('--server-url', help='Server URL', default=None)
-    parser.add_argument('--api-key', help='API Key', default=None)
-    parser.add_argument('--config', help='Configuration file', default='agent_config.json')
+    parser.add_argument('--server-url', default=None, help='Server URL')
+    parser.add_argument('--config', default='agent_config.json', help='Configuration file')
+    parser.add_argument('--api-key', default=None, help='API Key')
+    parser.add_argument('--test-mode', action='store_true', help='Run in test mode')
     
     args = parser.parse_args()
     
-    # Create and start agent
-    agent = ModularEndpointAgent(
-        server_url=args.server_url,
-        api_key=args.api_key,
-        config_file=args.config
-    )
-    
     try:
-        agent.start()
+        # Create and run agent
+        agent = ModularEndpointAgent(
+            server_url=args.server_url,
+            config_file=args.config,
+            api_key=args.api_key
+        )
+        
+        if args.test_mode:
+            print(f"Agent initialized successfully - ID: {agent.agent_id}")
+            print("Test mode - collecting sample data...")
+            
+            # Test basic functionality
+            inventory = agent.collect_full_inventory()
+            print(f"Inventory collected: {len(inventory.get('data', {}))} sections")
+            
+            sbom = agent.collect_sbom()
+            print(f"SBOM collected: {sbom.get('data', {}).get('summary', {}).get('total_packages', 0)} packages")
+            
+            print("Test completed successfully")
+        else:
+            # Run normally
+            agent.run()
+            
     except Exception as e:
-        logging.error(f"Agent failed to start: {e}")
-        sys.exit(1)
+        print(f"Error starting agent: {e}")
+        return 1
+    
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    exit(main())
